@@ -209,33 +209,29 @@ describe('Batching & Translation Logic', () => {
     assert.equal(b5, 30000); // capped at 30000
   });
 
-  test('MessageBatcher queues and flushes batches', (t, done) => {
-    let flushedBatches = [];
-    const batcher = new Lib.MessageBatcher({
-      intervalMs: 50,
-      maxBatchSize: 3,
-      onFlush: (batch) => {
-        flushedBatches.push(batch);
-      }
-    });
-
-    batcher.add({ id: '1', text: 'msg 1' });
-    batcher.add({ id: '2', text: 'msg 2' });
-    assert.equal(batcher.size(), 2);
-
-    // Adding 3rd triggers maxBatchSize flush
-    batcher.add({ id: '3', text: 'msg 3' });
-    assert.equal(flushedBatches.length, 1);
-    assert.equal(flushedBatches[0].length, 3);
-    assert.equal(batcher.size(), 0);
-
-    // Test interval flush for remaining
-    batcher.add({ id: '4', text: 'msg 4' });
-    assert.equal(batcher.size(), 1);
-
+  test('MessageBatcher flushes on interval, never immediately', (t, done) => {
+    const flushed = [];
+    const batcher = new Lib.MessageBatcher({ intervalMs: 50, maxBatchSize: 3, onFlush: (b) => flushed.push(b) });
+    for (let i = 1; i <= 3; i++) batcher.add({ id: String(i), text: 'm' + i });
+    assert.equal(flushed.length, 0);
     setTimeout(() => {
-      assert.equal(flushedBatches.length, 2);
-      assert.equal(flushedBatches[1][0].id, '4');
+      assert.equal(flushed.length, 1);
+      assert.equal(flushed[0].length, 3);
+      batcher.clear();
+      done();
+    }, 80);
+  });
+
+  test('MessageBatcher caps queue at 2x batch size and drops oldest', (t, done) => {
+    const flushed = []; const dropped = [];
+    const batcher = new Lib.MessageBatcher({ intervalMs: 50, maxBatchSize: 4, onFlush: (b) => flushed.push(b), onDrop: (d) => dropped.push(...d) });
+    for (let i = 1; i <= 10; i++) batcher.add({ id: 'msg-' + i, text: 't' });
+    assert.equal(batcher.size(), 8);
+    assert.deepEqual(dropped.map(d => d.id), ['msg-1', 'msg-2']);
+    setTimeout(() => {
+      assert.equal(flushed.length, 1);
+      assert.equal(flushed[0].length, 4);
+      assert.equal(flushed[0][0].id, 'msg-3');
       batcher.clear();
       done();
     }, 80);
@@ -276,6 +272,180 @@ describe('Batching & Translation Logic', () => {
   test('buildTranslationPrompt returns empty string for empty input', () => {
     assert.equal(Lib.buildTranslationPrompt([]), '');
     assert.equal(Lib.buildTranslationPrompt(null), '');
+  });
+
+  test('buildTranslationPrompt includes wantReplies flag and instructs to omit replies when false', () => {
+    const msgs = [
+      { id: '10', text: 'Clean pull, what build is that?', wantReplies: true },
+      { id: '11', text: 'lol', wantReplies: false }
+    ];
+    const prompt = Lib.buildTranslationPrompt(msgs);
+    assert.ok(prompt.includes('"wantReplies": true'));
+    assert.ok(prompt.includes('"wantReplies": false'));
+    assert.ok(prompt.includes('omit the "replies" field'));
+    assert.ok(prompt.includes('"simple"'));
+    assert.ok(prompt.includes('"natural"'));
+    assert.ok(prompt.includes('"playful"'));
+  });
+
+  test('parseTranslationResponse parses replies object when returned by Gemini', () => {
+    const jsonStr = JSON.stringify([
+      {
+        id: '10',
+        zh: '拉怪很漂亮，你是什么天赋？',
+        note: 'pull: 开怪/拉怪',
+        replies: {
+          simple: 'Nice pull! What build?',
+          natural: 'Clean pull ngl, drop the build?',
+          playful: 'Bro cooked that pull sheesh'
+        }
+      },
+      {
+        id: '11',
+        zh: '笑死',
+        note: 'lol: 大笑'
+      }
+    ]);
+    const parsed = Lib.parseTranslationResponse(jsonStr);
+    assert.equal(parsed.length, 2);
+    assert.equal(parsed[0].id, '10');
+    assert.ok(parsed[0].replies);
+    assert.equal(parsed[0].replies.simple, 'Nice pull! What build?');
+    assert.equal(parsed[0].replies.natural, 'Clean pull ngl, drop the build?');
+    assert.equal(parsed[0].replies.playful, 'Bro cooked that pull sheesh');
+
+    assert.equal(parsed[1].id, '11');
+    assert.equal(parsed[1].replies, undefined);
+  });
+});
+
+describe('Auto Reply Eligibility (shouldAutoReply)', () => {
+  test('returns false for streamer messages (username equals channel, case-insensitive)', () => {
+    // Exact match
+    assert.equal(Lib.shouldAutoReply({ username: 'wow_wyc', text: 'Hello chat, welcome!' }, 'wow_wyc'), false);
+    // Case-insensitive & hash prefix
+    assert.equal(Lib.shouldAutoReply({ username: 'WoW_WyC', text: 'Starting the raid now' }, '#wow_wyc'), false);
+    // Channel from msg property
+    assert.equal(Lib.shouldAutoReply({ username: 'shroud', channel: 'shroud', text: 'Thanks for coming by' }), false);
+    // Display-name tag
+    assert.equal(Lib.shouldAutoReply({ displayName: 'StreamerOne', text: 'Hey guys', tags: {} }, 'streamerone'), false);
+  });
+
+  test('returns false for command messages starting with "!"', () => {
+    assert.equal(Lib.shouldAutoReply({ username: 'viewer1', text: '!drop' }, 'wow_wyc'), false);
+    assert.equal(Lib.shouldAutoReply({ username: 'viewer2', text: '  !roll 100' }, 'wow_wyc'), false);
+    assert.equal(Lib.shouldAutoReply({ username: 'viewer3', text: '!help with talents please' }, 'wow_wyc'), false);
+  });
+
+  test('returns false for pure emote messages', () => {
+    // Single emote: "Kappa" (0-4)
+    assert.equal(
+      Lib.shouldAutoReply(
+        { username: 'viewer', text: 'Kappa', tags: { emotes: '25:0-4' } },
+        'wow_wyc'
+      ),
+      false
+    );
+
+    // Repeated emotes: "Kappa Kappa" (0-4, 6-10)
+    assert.equal(
+      Lib.shouldAutoReply(
+        { username: 'viewer', text: 'Kappa Kappa', tags: { emotes: '25:0-4,6-10' } },
+        'wow_wyc'
+      ),
+      false
+    );
+
+    // Multiple different emotes: "Kappa PogChamp" (0-4 / 6-13)
+    assert.equal(
+      Lib.shouldAutoReply(
+        { username: 'viewer', text: 'Kappa PogChamp', tags: { emotes: '25:0-4/88:6-13' } },
+        'wow_wyc'
+      ),
+      false
+    );
+
+    // Emotes with leading/trailing spaces
+    assert.equal(
+      Lib.shouldAutoReply(
+        { username: 'viewer', text: '  Kappa  ', tags: { emotes: '25:2-6' } },
+        'wow_wyc'
+      ),
+      false
+    );
+  });
+
+  test('returns false for very short messages (< 4 letters after removing emotes/punctuation)', () => {
+    // Examples from requirements: "lol", "W", "<3", "EZ"
+    assert.equal(Lib.shouldAutoReply({ username: 'viewer', text: 'lol' }, 'wow_wyc'), false);
+    assert.equal(Lib.shouldAutoReply({ username: 'viewer', text: 'W' }, 'wow_wyc'), false);
+    assert.equal(Lib.shouldAutoReply({ username: 'viewer', text: '<3' }, 'wow_wyc'), false);
+    assert.equal(Lib.shouldAutoReply({ username: 'viewer', text: 'EZ' }, 'wow_wyc'), false);
+
+    // Other short reactions & emotes
+    assert.equal(Lib.shouldAutoReply({ username: 'viewer', text: 'gg' }, 'wow_wyc'), false);
+    assert.equal(Lib.shouldAutoReply({ username: 'viewer', text: 'pog' }, 'wow_wyc'), false);
+    assert.equal(Lib.shouldAutoReply({ username: 'viewer', text: 'L' }, 'wow_wyc'), false);
+    assert.equal(Lib.shouldAutoReply({ username: 'viewer', text: '???' }, 'wow_wyc'), false);
+    assert.equal(Lib.shouldAutoReply({ username: 'viewer', text: '!' }, 'wow_wyc'), false);
+
+    // Message with emote + short remaining text (< 4 letters)
+    assert.equal(
+      Lib.shouldAutoReply(
+        { username: 'viewer', text: 'Kappa lol', tags: { emotes: '25:0-4' } },
+        'wow_wyc'
+      ),
+      false
+    );
+    assert.equal(
+      Lib.shouldAutoReply(
+        { username: 'viewer', text: 'Kappa <3', tags: { emotes: '25:0-4' } },
+        'wow_wyc'
+      ),
+      false
+    );
+    assert.equal(
+      Lib.shouldAutoReply(
+        { username: 'viewer', text: 'Kappa !', tags: { emotes: '25:0-4' } },
+        'wow_wyc'
+      ),
+      false
+    );
+  });
+
+  test('returns false for empty, whitespace, or invalid inputs', () => {
+    assert.equal(Lib.shouldAutoReply(null, 'wow_wyc'), false);
+    assert.equal(Lib.shouldAutoReply(undefined, 'wow_wyc'), false);
+    assert.equal(Lib.shouldAutoReply({}, 'wow_wyc'), false);
+    assert.equal(Lib.shouldAutoReply({ username: 'v', text: '' }, 'wow_wyc'), false);
+    assert.equal(Lib.shouldAutoReply({ username: 'v', text: '    ' }, 'wow_wyc'), false);
+  });
+
+  test('returns true for valid, interactive chatter messages (>= 4 letters)', () => {
+    assert.equal(
+      Lib.shouldAutoReply({ username: 'viewer1', text: 'Can you show your talents?' }, 'wow_wyc'),
+      true
+    );
+    assert.equal(
+      Lib.shouldAutoReply({ username: 'viewer2', text: 'Nice healing in that mythic key!' }, 'wow_wyc'),
+      true
+    );
+    assert.equal(
+      Lib.shouldAutoReply({ username: 'viewer3', text: 'ggwp' }, 'wow_wyc'),
+      true
+    );
+    assert.equal(
+      Lib.shouldAutoReply({ username: 'viewer4', text: 'lmao that was hilarious' }, 'wow_wyc'),
+      true
+    );
+    // Emote followed by substantive question/comment
+    assert.equal(
+      Lib.shouldAutoReply(
+        { username: 'viewer5', text: 'Kappa how did you survive that mechanic?', tags: { emotes: '25:0-4' } },
+        'wow_wyc'
+      ),
+      true
+    );
   });
 });
 

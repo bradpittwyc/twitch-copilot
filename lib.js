@@ -227,7 +227,7 @@
 
   /**
    * Build Gemini prompt for translating a batch of Twitch chat messages.
-   * Expects messages: [{ id, text, username }]
+   * Expects messages: [{ id, text, username, wantReplies }]
    */
   function buildTranslationPrompt(messages) {
     if (!Array.isArray(messages) || messages.length === 0) {
@@ -236,7 +236,8 @@
     const cleanList = messages.map(function (m) {
       return {
         id: String(m.id),
-        text: String(m.text || '')
+        text: String(m.text || ''),
+        wantReplies: Boolean(m.wantReplies ?? m.reply ?? m.repliesWanted)
       };
     });
 
@@ -246,19 +247,62 @@
       'Identify and explain any Twitch emotes, slang, gaming acronyms, or WoW terms ' +
       '(e.g., pog, kek, kekw, LFG, tank, heal, dps, wipe, aggro, oom, bis, monkaS, copium, diff, W, L, etc.) ' +
       'in a short, punchy note.\n\n' +
+      'For reply suggestions:\n' +
+      'Each input message contains a "wantReplies" boolean flag.\n' +
+      '- If "wantReplies" is true: generate 3 short English reply options suitable for sending in Twitch chat:\n' +
+      '  "simple": Brief, direct, easy English (e.g. "Nice play!", "What build is that?").\n' +
+      '  "natural": Authentic native gamer / Twitch chatter style (e.g. "Clean pull ngl, love to see it").\n' +
+      '  "playful": Witty, humorous, friendly banter or meme-aware (e.g. "Bro is cooking let him cook haha").\n' +
+      '  Include them under a "replies" key formatted as: {"simple": "...", "natural": "...", "playful": "..."} where each reply is a short English string.\n' +
+      '- If "wantReplies" is false: DO NOT generate replies. omit the "replies" field completely for that message.\n\n' +
       'Requirements:\n' +
       '1. Return ONLY a valid JSON array of objects.\n' +
-      '2. Each object must have exactly these keys: "id" (string matching input id), "zh" (Chinese translation), "note" (short slang/WoW explanation or empty string "" if none).\n' +
-      '3. Do not include markdown code fences or conversational text.\n\n' +
+      '2. Each object must have keys: "id" (string matching input id), "zh" (Chinese translation), "note" (short slang/WoW explanation or empty string "" if none).\n' +
+      '3. When "wantReplies" is true, also include "replies": {"simple": "...", "natural": "...", "playful": "..."} with short English strings. When "wantReplies" is false, omit the "replies" key.\n' +
+      '4. Do not include markdown code fences or conversational text.\n\n' +
       'Input messages:\n' +
       JSON.stringify(cleanList, null, 2)
     );
   }
 
   /**
+   * Helper to format a single translation item with optional replies.
+   */
+  function formatTranslationItem(item) {
+    if (!item || typeof item !== 'object') {
+      return { id: '', zh: '', note: '' };
+    }
+    const res = {
+      id: String(item.id || ''),
+      zh: String(item.zh || ''),
+      note: String(item.note || '')
+    };
+    if (item.replies && typeof item.replies === 'object') {
+      const simple = typeof item.replies.simple === 'string'
+        ? item.replies.simple
+        : (item.replies.simple && item.replies.simple.en ? item.replies.simple.en : '');
+      const natural = typeof item.replies.natural === 'string'
+        ? item.replies.natural
+        : (item.replies.natural && item.replies.natural.en ? item.replies.natural.en : '');
+      const playful = typeof item.replies.playful === 'string'
+        ? item.replies.playful
+        : (item.replies.playful && item.replies.playful.en ? item.replies.playful.en : '');
+
+      if (simple || natural || playful) {
+        res.replies = {
+          simple: String(simple || '').trim(),
+          natural: String(natural || '').trim(),
+          playful: String(playful || '').trim()
+        };
+      }
+    }
+    return res;
+  }
+
+  /**
    * Parse Gemini response for translation batch.
    * Handles raw JSON string, code block wrapped JSON, or Gemini API response object.
-   * Returns array of { id, zh, note }.
+   * Returns array of { id, zh, note, replies?: { simple, natural, playful } }.
    */
   function parseTranslationResponse(payload) {
     if (!payload) return [];
@@ -267,13 +311,7 @@
     if (typeof payload === 'string') {
       text = payload;
     } else if (Array.isArray(payload)) {
-      return payload.map(function (item) {
-        return {
-          id: String(item.id || ''),
-          zh: String(item.zh || ''),
-          note: String(item.note || '')
-        };
-      });
+      return payload.map(formatTranslationItem);
     } else if (payload && payload.candidates && payload.candidates[0]) {
       const candidate = payload.candidates[0];
       if (candidate.content && candidate.content.parts && candidate.content.parts[0]) {
@@ -291,13 +329,7 @@
     try {
       const parsed = JSON.parse(cleaned);
       if (Array.isArray(parsed)) {
-        return parsed.map(function (item) {
-          return {
-            id: String(item.id || ''),
-            zh: String(item.zh || ''),
-            note: String(item.note || '')
-          };
-        });
+        return parsed.map(formatTranslationItem);
       }
       return [];
     } catch (_) {
@@ -307,13 +339,7 @@
         try {
           const fallbackParsed = JSON.parse(arrayMatch[0]);
           if (Array.isArray(fallbackParsed)) {
-            return fallbackParsed.map(function (item) {
-              return {
-                id: String(item.id || ''),
-                zh: String(item.zh || ''),
-                note: String(item.note || '')
-              };
-            });
+            return fallbackParsed.map(formatTranslationItem);
           }
         } catch (__) {
           return [];
@@ -321,6 +347,137 @@
       }
       return [];
     }
+  }
+
+  /**
+   * Determine whether a message should receive auto-reply suggestions.
+   * Pure function returning false for:
+   * 1. Messages from the streamer (username equals channel, case-insensitive)
+   * 2. Messages that are pure emotes (all non-space text falls inside Twitch emotes tag ranges)
+   * 3. Very short messages (< 4 letters after removing emotes and punctuation, e.g. "lol", "W", "<3", "EZ")
+   * 4. Command messages starting with "!"
+   */
+  function shouldAutoReply(msg, channel) {
+    if (!msg || typeof msg !== 'object') {
+      return false;
+    }
+    const rawText = typeof msg.text === 'string' ? msg.text : '';
+    const trimmed = rawText.trim();
+    if (!trimmed) {
+      return false;
+    }
+
+    // Command messages starting with "!"
+    if (trimmed.startsWith('!')) {
+      return false;
+    }
+
+    // Streamer messages (username equals channel, case-insensitive)
+    const targetChannel = (channel || msg.channel || '').replace(/^#/, '').trim().toLowerCase();
+    const username = (
+      msg.username ||
+      msg.displayName ||
+      (msg.tags && (msg.tags['display-name'] || msg.tags.username)) ||
+      ''
+    ).trim().toLowerCase();
+
+    if (targetChannel && username && username === targetChannel) {
+      return false;
+    }
+
+    // Extract Twitch emote tag ranges
+    const emotesTag = (msg.tags && typeof msg.tags.emotes === 'string')
+      ? msg.tags.emotes
+      : (typeof msg.emotes === 'string' ? msg.emotes : '');
+
+    const ranges = [];
+    if (emotesTag && emotesTag.trim()) {
+      const groups = emotesTag.trim().split('/');
+      for (let g = 0; g < groups.length; g++) {
+        const group = groups[g];
+        if (!group) continue;
+        const colonIdx = group.indexOf(':');
+        if (colonIdx === -1) continue;
+        const occurrences = group.slice(colonIdx + 1).split(',');
+        for (let o = 0; o < occurrences.length; o++) {
+          const occ = occurrences[o];
+          const dashIdx = occ.indexOf('-');
+          if (dashIdx === -1) continue;
+          const start = parseInt(occ.slice(0, dashIdx), 10);
+          const end = parseInt(occ.slice(dashIdx + 1), 10);
+          if (!isNaN(start) && !isNaN(end) && start <= end) {
+            ranges.push([start, end]);
+          }
+        }
+      }
+    }
+
+    // Sort ranges by start index
+    ranges.sort((a, b) => a[0] - b[0]);
+
+    // Check if pure emotes: all non-space characters in rawText are inside emote ranges
+    if (ranges.length > 0) {
+      let hasNonSpace = false;
+      let allNonSpaceCovered = true;
+      for (let i = 0; i < rawText.length; i++) {
+        const char = rawText[i];
+        if (char !== ' ' && char !== '\t' && char !== '\n' && char !== '\r') {
+          hasNonSpace = true;
+          let covered = false;
+          for (let r = 0; r < ranges.length; r++) {
+            if (i >= ranges[r][0] && i <= ranges[r][1]) {
+              covered = true;
+              break;
+            }
+          }
+          if (!covered) {
+            allNonSpaceCovered = false;
+            break;
+          }
+        }
+      }
+      if (hasNonSpace && allNonSpaceCovered) {
+        return false;
+      }
+    }
+
+    // Remove emotes from text
+    let textWithoutEmotes = '';
+    let cursor = 0;
+    const mergedRanges = [];
+    for (let i = 0; i < ranges.length; i++) {
+      const r = ranges[i];
+      if (mergedRanges.length === 0) {
+        mergedRanges.push([r[0], r[1]]);
+      } else {
+        const last = mergedRanges[mergedRanges.length - 1];
+        if (r[0] <= last[1] + 1) {
+          last[1] = Math.max(last[1], r[1]);
+        } else {
+          mergedRanges.push([r[0], r[1]]);
+        }
+      }
+    }
+
+    for (let i = 0; i < mergedRanges.length; i++) {
+      const start = mergedRanges[i][0];
+      const end = mergedRanges[i][1];
+      if (start > cursor) {
+        textWithoutEmotes += rawText.slice(cursor, start);
+      }
+      cursor = Math.max(cursor, end + 1);
+    }
+    if (cursor < rawText.length) {
+      textWithoutEmotes += rawText.slice(cursor);
+    }
+
+    // Very short (< 4 letters after removing emotes and punctuation)
+    const letters = textWithoutEmotes.match(/\p{L}/gu) || [];
+    if (letters.length < 4) {
+      return false;
+    }
+
+    return true;
   }
 
   /**
@@ -449,6 +606,7 @@
       options = options || {};
       this.intervalMs = typeof options.intervalMs === 'number' ? options.intervalMs : 2500;
       this.maxBatchSize = typeof options.maxBatchSize === 'number' ? options.maxBatchSize : 20;
+      this.onDrop = options.onDrop || null;
       this.onFlush = typeof options.onFlush === 'function' ? options.onFlush : null;
 
       this.queue = [];
@@ -464,10 +622,14 @@
         return;
       }
       this.queue.push(message);
-
-      if (this.queue.length >= this.maxBatchSize) {
-        this.flush();
-      } else if (!this.timer && !this.isPaused) {
+      // Busy chat: keep only the newest messages to protect API quota
+      const cap = this.maxBatchSize * 2;
+      if (this.queue.length > cap) {
+        const dropped = this.queue.splice(0, this.queue.length - cap);
+        if (typeof this.onDrop === 'function') this.onDrop(dropped);
+      }
+      // Never flush faster than intervalMs (rate limit friendly)
+      if (!this.timer && !this.isPaused) {
         this.scheduleNextFlush(this.intervalMs);
       }
     }
@@ -562,6 +724,7 @@
     calculateBackoff: calculateBackoff,
     buildTranslationPrompt: buildTranslationPrompt,
     parseTranslationResponse: parseTranslationResponse,
+    shouldAutoReply: shouldAutoReply,
     buildReplyPrompt: buildReplyPrompt,
     parseReplyResponse: parseReplyResponse,
     getReadableColor: getReadableColor,

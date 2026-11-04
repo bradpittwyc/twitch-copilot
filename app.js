@@ -21,11 +21,14 @@
   // LocalStorage keys
   const STORAGE_KEY_API_KEY = 'twitch_copilot_gemini_key';
   const STORAGE_KEY_MODEL = 'twitch_copilot_gemini_model';
+  const STORAGE_KEY_AUTO_REPLY = 'twitch_copilot_auto_reply';
   const DEFAULT_CHANNEL = 'wow_wyc';
   const DEFAULT_MODEL = 'gemini-3.5-flash';
   const FALLBACK_MODEL = 'gemini-3-flash-preview';
   const MAX_MESSAGES = 300;
-  const BATCH_INTERVAL_MS = 2500;
+  const BATCH_INTERVAL_MS = 7000; // ~8 requests/min max, fits Gemini free tier
+  const BATCH_SIZE_AUTO_REPLY_ON = 8;
+  const BATCH_SIZE_AUTO_REPLY_OFF = 15;
 
   // DOM Elements
   const elements = {
@@ -48,6 +51,7 @@
     btnToggleKeyVisibility: document.getElementById('btn-toggle-key-visibility'),
     selectModel: document.getElementById('select-model'),
     inputCustomModel: document.getElementById('input-custom-model'),
+    checkboxAutoReply: document.getElementById('checkbox-auto-reply'),
     btnTestKey: document.getElementById('btn-test-key'),
     testKeyStatus: document.getElementById('test-key-status'),
     btnClearSettings: document.getElementById('btn-clear-settings'),
@@ -77,6 +81,9 @@
   };
 
   // State
+  const autoReplySetting = localStorage.getItem(STORAGE_KEY_AUTO_REPLY);
+  const autoReplyDefault = autoReplySetting === null ? true : autoReplySetting === 'true';
+
   const state = {
     channel: DEFAULT_CHANNEL,
     ws: null,
@@ -84,16 +91,21 @@
     wsReconnectTimer: null,
     apiKey: localStorage.getItem(STORAGE_KEY_API_KEY) || '',
     model: (/^gemini-(1\.|2\.|3\.1-flash-lite$)/.test(localStorage.getItem(STORAGE_KEY_MODEL) || '') ? DEFAULT_MODEL : (localStorage.getItem(STORAGE_KEY_MODEL) || DEFAULT_MODEL)),
-    messageStore: new Map(), // id -> { id, author, text, timestamp, color, zh, note, replies }
+    autoReply: autoReplyDefault,
+    messageStore: new Map(), // id -> { id, author, text, timestamp, color, zh, note, replies, wantReplies }
     unreadCount: 0,
     userScrolledUp: false,
     currentReplyMsgId: null
   };
 
-  // Initialize Batcher
+  // Initialize Batcher (Max 8 messages per batch when auto replies on; extra queue to next batch)
   const messageBatcher = new Lib.MessageBatcher({
     intervalMs: BATCH_INTERVAL_MS,
-    maxBatchSize: 15,
+    onDrop: (dropped) => dropped.forEach(item => {
+      const el = document.getElementById(`trans-${item.id}`);
+      if (el) el.innerHTML = '<span class="msg-trans-tip">聊天太快，已跳过（点此消息可单独生成）</span>';
+    }),
+    maxBatchSize: state.autoReply ? BATCH_SIZE_AUTO_REPLY_ON : BATCH_SIZE_AUTO_REPLY_OFF,
     onFlush: handleBatchFlush
   });
 
@@ -133,6 +145,9 @@
       elements.inputCustomModel.value = state.model;
       elements.inputCustomModel.classList.remove('hidden');
     }
+    if (elements.checkboxAutoReply) {
+      elements.checkboxAutoReply.checked = Boolean(state.autoReply);
+    }
     elements.testKeyStatus.textContent = '';
     elements.testKeyStatus.className = 'test-key-status';
     elements.settingsModal.classList.remove('hidden');
@@ -150,9 +165,11 @@
     if (chosenModel === 'custom') {
       chosenModel = elements.inputCustomModel.value.trim() || DEFAULT_MODEL;
     }
+    const autoReplyEnabled = elements.checkboxAutoReply ? elements.checkboxAutoReply.checked : true;
 
     state.apiKey = rawKey;
     state.model = chosenModel;
+    state.autoReply = autoReplyEnabled;
 
     if (rawKey) {
       localStorage.setItem(STORAGE_KEY_API_KEY, rawKey);
@@ -160,6 +177,10 @@
       localStorage.removeItem(STORAGE_KEY_API_KEY);
     }
     localStorage.setItem(STORAGE_KEY_MODEL, chosenModel);
+    localStorage.setItem(STORAGE_KEY_AUTO_REPLY, String(autoReplyEnabled));
+
+    // Update batcher batch size limit dynamically
+    messageBatcher.maxBatchSize = autoReplyEnabled ? BATCH_SIZE_AUTO_REPLY_ON : BATCH_SIZE_AUTO_REPLY_OFF;
 
     updateKeyBannerState();
     closeSettingsModal();
@@ -175,11 +196,17 @@
     if (confirm('确定要清除已保存的 API Key 与模型配置吗？')) {
       localStorage.removeItem(STORAGE_KEY_API_KEY);
       localStorage.removeItem(STORAGE_KEY_MODEL);
+      localStorage.removeItem(STORAGE_KEY_AUTO_REPLY);
       state.apiKey = '';
       state.model = DEFAULT_MODEL;
+      state.autoReply = true;
       elements.inputApiKey.value = '';
       elements.selectModel.value = DEFAULT_MODEL;
       elements.inputCustomModel.classList.add('hidden');
+      if (elements.checkboxAutoReply) {
+        elements.checkboxAutoReply.checked = true;
+      }
+      messageBatcher.maxBatchSize = BATCH_SIZE_AUTO_REPLY_ON;
       elements.testKeyStatus.textContent = '已清除配置';
       elements.testKeyStatus.className = 'test-key-status';
       updateKeyBannerState();
@@ -190,14 +217,27 @@
   /* ==========================================================================
      Gemini REST API Calls
      ========================================================================== */
+  // Models that hit quota/unavailable this session are skipped (free tier of
+  // gemini-3.5-flash is only ~20 requests/day).
+  const exhaustedModels = new Set();
+  const FALLBACK_CHAIN = ['gemini-3.5-flash', 'gemini-3.5-flash-lite', FALLBACK_MODEL];
+
   async function requestGemini(promptText, apiKey, model) {
-    const first = await requestGeminiOnce(promptText, apiKey, model);
-    const used = model || state.model || DEFAULT_MODEL;
-    if ((first.status === 404 || first.status === 503) && used !== FALLBACK_MODEL) {
-      console.warn('Model ' + used + ' returned ' + first.status + ', falling back to ' + FALLBACK_MODEL);
-      return requestGeminiOnce(promptText, apiKey, FALLBACK_MODEL);
+    const preferred = model || state.model || DEFAULT_MODEL;
+    const chain = [preferred, ...FALLBACK_CHAIN.filter(m => m !== preferred)];
+    const candidates = chain.filter(m => !exhaustedModels.has(m));
+    if (candidates.length === 0) candidates.push(preferred);
+    let resp = null;
+    for (const m of candidates) {
+      resp = await requestGeminiOnce(promptText, apiKey, m);
+      if (resp.status === 404 || resp.status === 503 || resp.status === 429) {
+        if (resp.status !== 503) exhaustedModels.add(m);
+        console.warn('Model ' + m + ' returned ' + resp.status + ', trying next fallback');
+        continue;
+      }
+      return resp;
     }
-    return first;
+    return resp;
   }
 
   async function requestGeminiOnce(promptText, apiKey, model) {
@@ -284,6 +324,13 @@
       return;
     }
 
+    // If auto-reply is disabled globally in settings, do not request replies in batch
+    if (!state.autoReply) {
+      batch.forEach(item => {
+        item.wantReplies = false;
+      });
+    }
+
     // Set UI to translating
     batch.forEach(item => {
       const transEl = document.getElementById(`trans-${item.id}`);
@@ -336,6 +383,7 @@
       batch.forEach(item => {
         const transEl = document.getElementById(`trans-${item.id}`);
         const noteEl = document.getElementById(`note-${item.id}`);
+        const repliesEl = document.getElementById(`replies-${item.id}`);
         const result = resultMap.get(item.id);
 
         if (result && result.zh) {
@@ -347,11 +395,23 @@
             noteEl.textContent = `💡 ${result.note.trim()}`;
           }
 
-          // Cache translation in state store
+          // Cache translation and replies in state store
           const stored = state.messageStore.get(item.id);
           if (stored) {
             stored.zh = result.zh;
             stored.note = result.note || '';
+            if (result.replies) {
+              stored.replies = {
+                simple: { en: result.replies.simple, zhDesc: '简洁回复' },
+                natural: { en: result.replies.natural, zhDesc: '地道弹幕' },
+                playful: { en: result.replies.playful, zhDesc: '趣味调侃' }
+              };
+            }
+          }
+
+          // Render inline replies under translation/note
+          if (result.replies && repliesEl) {
+            renderInlineReplies(repliesEl, result.replies);
           }
         } else {
           if (transEl) {
@@ -385,6 +445,73 @@
       .replace(/'/g, '&#39;');
   }
 
+  function renderInlineReplies(container, replies) {
+    if (!container || !replies) return;
+
+    const simple = typeof replies.simple === 'string' ? replies.simple : (replies.simple?.en || '');
+    const natural = typeof replies.natural === 'string' ? replies.natural : (replies.natural?.en || '');
+    const playful = typeof replies.playful === 'string' ? replies.playful : (replies.playful?.en || '');
+
+    if (!simple && !natural && !playful) {
+      container.classList.add('hidden');
+      return;
+    }
+
+    container.innerHTML = '';
+
+    const rows = [
+      { key: 'simple', label: '简单', cls: 'label-simple', text: simple },
+      { key: 'natural', label: '地道', cls: 'label-natural', text: natural },
+      { key: 'playful', label: '调皮', cls: 'label-playful', text: playful }
+    ];
+
+    rows.forEach(row => {
+      if (!row.text) return;
+      const rowEl = document.createElement('div');
+      rowEl.className = 'reply-row';
+
+      const labelEl = document.createElement('span');
+      labelEl.className = `reply-label ${row.cls}`;
+      labelEl.textContent = row.label;
+
+      const textEl = document.createElement('span');
+      textEl.className = 'reply-text';
+      textEl.textContent = row.text;
+
+      const copyBtn = document.createElement('button');
+      copyBtn.type = 'button';
+      copyBtn.className = 'btn btn-inline-copy';
+      copyBtn.setAttribute('aria-label', `复制${row.label}英文回复`);
+      copyBtn.innerHTML = '<span class="copy-icon">📋</span><span class="copy-text">复制</span>';
+
+      copyBtn.addEventListener('click', (e) => {
+        // Stop propagation so clicking copy doesn't trigger parent msg click / open sheet
+        e.stopPropagation();
+        copyTextToClipboard(row.text).then(success => {
+          if (success) {
+            copyBtn.classList.add('copied');
+            const span = copyBtn.querySelector('.copy-text');
+            if (span) span.textContent = '已复制 ✓';
+            showToast(`已复制: "${row.text}"`);
+            setTimeout(() => {
+              copyBtn.classList.remove('copied');
+              if (span) span.textContent = '复制';
+            }, 2500);
+          } else {
+            showToast('复制失败，请手动长按复制');
+          }
+        });
+      });
+
+      rowEl.appendChild(labelEl);
+      rowEl.appendChild(textEl);
+      rowEl.appendChild(copyBtn);
+      container.appendChild(rowEl);
+    });
+
+    container.classList.remove('hidden');
+  }
+
   function appendChatMessage(parsed) {
     if (!parsed) return;
 
@@ -396,6 +523,8 @@
     const container = elements.chatMessages;
     const isAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 70;
 
+    const wantReplies = Boolean(state.autoReply && Lib.shouldAutoReply(parsed, state.channel));
+
     // Store in message cache
     state.messageStore.set(parsed.id, {
       id: parsed.id,
@@ -405,7 +534,8 @@
       color: parsed.color,
       zh: '',
       note: '',
-      replies: null
+      replies: null,
+      wantReplies: wantReplies
     });
 
     // Create message element
@@ -434,6 +564,7 @@
         </div>
         <div class="msg-note" id="note-${parsed.id}"></div>
       </div>
+      <div class="msg-replies hidden" id="replies-${parsed.id}"></div>
     `;
 
     // Tap to open reply suggestions
@@ -447,7 +578,8 @@
     messageBatcher.add({
       id: parsed.id,
       text: parsed.text,
-      username: parsed.displayName
+      username: parsed.displayName,
+      wantReplies: wantReplies
     });
 
     // Cap message list at MAX_MESSAGES (300)
@@ -584,6 +716,12 @@
       // Only display if this modal is still open for the same message
       if (state.currentReplyMsgId === msg.id) {
         displayReplies(parsed);
+      }
+
+      // Synchronize inline replies on the message card
+      const cardRepliesEl = document.getElementById(`replies-${msg.id}`);
+      if (cardRepliesEl) {
+        renderInlineReplies(cardRepliesEl, parsed);
       }
     } catch (err) {
       elements.suggestionsLoading.classList.add('hidden');

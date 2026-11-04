@@ -487,6 +487,105 @@ html, body {
   display: none;
 }
 
+/* Inline Reply Suggestions (3 rows: 简单/地道/调皮) */
+.msg-replies {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.08);
+}
+
+.msg-replies.hidden {
+  display: none !important;
+}
+
+.reply-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  padding: 8px 12px;
+  min-height: 44px;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.reply-row:hover {
+  border-color: var(--border-strong);
+  background-color: var(--bg-surface-elevated);
+}
+
+.reply-label {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 8px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  min-width: 44px;
+  text-align: center;
+  letter-spacing: 0.5px;
+}
+
+.reply-label.label-simple {
+  background-color: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+}
+
+.reply-label.label-natural {
+  background-color: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+}
+
+.reply-label.label-playful {
+  background-color: rgba(168, 85, 247, 0.15);
+  color: #c084fc;
+}
+
+.reply-text {
+  font-size: 15px;
+  font-weight: 600;
+  color: #fff;
+  flex: 1;
+  min-width: 0;
+  line-height: 1.4;
+  word-break: break-word;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.btn-inline-copy {
+  flex-shrink: 0;
+  background-color: var(--bg-surface-elevated);
+  border: 1px solid var(--border-strong);
+  color: var(--text-main);
+  padding: 8px 16px;
+  min-height: 42px;
+  min-width: 76px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.btn-inline-copy:hover {
+  background-color: var(--bg-surface-hover);
+  border-color: var(--brand-purple-light);
+}
+
+.btn-inline-copy.copied {
+  background-color: rgba(16, 185, 129, 0.2);
+  border-color: var(--accent-green);
+  color: #34d399;
+}
+
 /* Floating Scroll to Bottom Button */
 .btn-scroll-bottom {
   position: absolute;
@@ -696,6 +795,25 @@ html, body {
 .badge-local {
   background-color: rgba(16, 185, 129, 0.15);
   color: #34d399;
+}
+
+.form-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-main);
+  cursor: pointer;
+  user-select: none;
+}
+
+.form-checkbox {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--brand-purple);
+  cursor: pointer;
+  border-radius: 4px;
 }
 
 .test-key-row {
