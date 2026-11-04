@@ -1110,3 +1110,17 @@ html, body {
     max-height: 90vh;
   }
 }
+
+.btn-try-channel {
+  display: inline-block;
+  margin: 6px 4px 0;
+  padding: 8px 14px;
+  font-size: 15px;
+  border-radius: 8px;
+  border: 1px solid #7c3aed;
+  background: #2e1065;
+  color: #e9d5ff;
+  cursor: pointer;
+}
+.btn-try-channel:active { background: #4c1d95; }
+.status-dot.error { background: #ef4444; box-shadow: 0 0 8px #ef4444; }

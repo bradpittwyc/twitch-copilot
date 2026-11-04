@@ -89,6 +89,8 @@
     ws: null,
     wsReconnectAttempt: 0,
     wsReconnectTimer: null,
+    wsConnectTimeout: null,
+    wsJoined: false,
     apiKey: localStorage.getItem(STORAGE_KEY_API_KEY) || '',
     model: (/^gemini-(1\.|2\.|3\.1-flash-lite$)/.test(localStorage.getItem(STORAGE_KEY_MODEL) || '') ? DEFAULT_MODEL : (localStorage.getItem(STORAGE_KEY_MODEL) || DEFAULT_MODEL)),
     autoReply: autoReplyDefault,
@@ -802,11 +804,65 @@
     elements.statusText.textContent = message;
   }
 
+
+  function setEmptyState(html) {
+    let el = document.getElementById('chat-empty-state');
+    if (!el) {
+      if (state.messageStore.size > 0) return;
+      el = document.createElement('div');
+      el.className = 'chat-empty-state';
+      el.id = 'chat-empty-state';
+      elements.chatMessages.appendChild(el);
+    }
+    elements.chatEmptyState = el;
+    el.innerHTML = html;
+  }
+
+  function emptyStateConnecting(channel) {
+    setEmptyState(`
+      <div class="empty-icon">💬</div>
+      <h3>正在连接 #${escapeHtml(channel)}...</h3>
+      <p>连接 Twitch 聊天室中，请稍候。</p>
+    `);
+  }
+
+  function emptyStateWaiting(channel) {
+    setEmptyState(`
+      <div class="empty-icon">✅</div>
+      <h3>已连接 #${escapeHtml(channel)}，等待弹幕</h3>
+      <p>频道没人说话或主播未开播时，这里会是空的（不是故障）。</p>
+      <div class="empty-tips">
+        <span>想验证功能？试试热门直播：</span>
+        <button type="button" class="btn-try-channel" data-channel="xqc">xqc</button>
+        <button type="button" class="btn-try-channel" data-channel="hasanabi">hasanabi</button>
+        <button type="button" class="btn-try-channel" data-channel="eslcs">eslcs</button>
+      </div>
+      <p style="margin-top:10px;opacity:.75;font-size:13px;">中国大陆若一直连不上，可能需要代理才能访问 Twitch IRC。</p>
+    `);
+  }
+
+  function emptyStateFailed(channel, reason) {
+    setEmptyState(`
+      <div class="empty-icon">⚠️</div>
+      <h3>无法连接 #${escapeHtml(channel)}</h3>
+      <p>${escapeHtml(reason || 'WebSocket 连接超时')}</p>
+      <div class="empty-tips">
+        <span>中国大陆访问 Twitch 通常需要代理。连上代理后刷新本页，或点下方重试。</span>
+        <button type="button" id="btn-retry-connect" class="btn-try-channel">重试连接</button>
+      </div>
+    `);
+  }
+
+
   function connectToTwitch(channel) {
     // Clear any existing reconnect timers & socket
     if (state.wsReconnectTimer) {
       clearTimeout(state.wsReconnectTimer);
       state.wsReconnectTimer = null;
+    }
+    if (state.wsConnectTimeout) {
+      clearTimeout(state.wsConnectTimeout);
+      state.wsConnectTimeout = null;
     }
     if (state.ws) {
       try {
@@ -820,9 +876,20 @@
 
     const normChannel = Lib.normalizeChannel(channel);
     state.channel = normChannel;
+    state.wsJoined = false;
     elements.channelInput.value = normChannel;
 
     updateConnectionStatus('connecting', `正在连接 #${normChannel}...`);
+    emptyStateConnecting(normChannel);
+
+    // If JOIN never confirms within 12s, treat as network failure (common in CN without proxy)
+    state.wsConnectTimeout = setTimeout(() => {
+      if (!state.wsJoined) {
+        updateConnectionStatus('error', `#${normChannel} (连接超时)`);
+        emptyStateFailed(normChannel, '12 秒内未完成 JOIN，多半是网络无法访问 Twitch IRC。');
+        try { if (state.ws) state.ws.close(); } catch (_) {}
+      }
+    }, 12000);
 
     try {
       const ws = new WebSocket('wss://irc-ws.chat.twitch.tv:443');
@@ -830,9 +897,8 @@
 
       ws.onopen = function () {
         state.wsReconnectAttempt = 0;
-        updateConnectionStatus('connected', `#${normChannel} (已连接)`);
+        updateConnectionStatus('connecting', `#${normChannel} (握手中...)`);
 
-        // Send authentication & join commands
         const commands = Lib.buildAuthCommands(normChannel);
         commands.forEach(cmd => {
           ws.send(cmd + '\r\n');
@@ -847,7 +913,6 @@
           const line = lines[i].trim();
           if (!line) continue;
 
-          // Respond to PING with PONG
           if (line.startsWith('PING')) {
             const pongReply = line.replace('PING', 'PONG') + '\r\n';
             if (ws.readyState === WebSocket.OPEN) {
@@ -856,7 +921,23 @@
             continue;
           }
 
-          // Parse chat message
+          // Confirm JOIN via ROOMSTATE / End of NAMES / JOIN ack
+          if (!state.wsJoined && (
+            line.includes('ROOMSTATE #' + normChannel) ||
+            line.includes('JOIN #' + normChannel) ||
+            line.includes(' 366 ') && line.includes('#' + normChannel)
+          )) {
+            state.wsJoined = true;
+            if (state.wsConnectTimeout) {
+              clearTimeout(state.wsConnectTimeout);
+              state.wsConnectTimeout = null;
+            }
+            updateConnectionStatus('connected', `#${normChannel} (已连接)`);
+            if (state.messageStore.size === 0) {
+              emptyStateWaiting(normChannel);
+            }
+          }
+
           if (line.includes('PRIVMSG')) {
             const parsed = Lib.parsePrivmsg(line);
             if (parsed) {
@@ -872,10 +953,14 @@
 
       ws.onclose = function () {
         state.ws = null;
+        if (!state.wsJoined) {
+          // Let timeout / scheduleReconnect handle messaging
+        }
         scheduleReconnect();
       };
     } catch (err) {
       console.error('Failed to instantiate WebSocket:', err);
+      emptyStateFailed(normChannel, String(err && err.message || err));
       scheduleReconnect();
     }
   }
@@ -923,6 +1008,20 @@
      Event Bindings & Initialization
      ========================================================================== */
   function bindEvents() {
+    // Empty-state quick channel switches / retry
+    elements.chatMessages.addEventListener('click', (e) => {
+      const tryBtn = e.target.closest('.btn-try-channel');
+      if (tryBtn) {
+        e.preventDefault();
+        if (tryBtn.id === 'btn-retry-connect') {
+          connectToTwitch(state.channel);
+          return;
+        }
+        const ch = tryBtn.getAttribute('data-channel');
+        if (ch) switchChannel(ch);
+      }
+    });
+
     // Channel change form
     elements.channelForm.addEventListener('submit', (e) => {
       e.preventDefault();
