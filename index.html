@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0e0e10">
+  <title>Twitch English Copilot - 即时直播翻译与回复助手</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Top Navigation & Controls -->
+    <header class="app-header">
+      <div class="header-main">
+        <div class="brand">
+          <div class="logo-icon">🎮</div>
+          <div class="brand-text">
+            <h1 class="app-title">Twitch English Copilot</h1>
+            <div class="status-wrap">
+              <span id="status-dot" class="status-dot disconnected"></span>
+              <span id="status-text" class="status-text">未连接</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="header-actions">
+          <form id="channel-form" class="channel-form" autocomplete="off">
+            <div class="channel-input-wrap">
+              <span class="channel-prefix">#</span>
+              <input
+                type="text"
+                id="channel-input"
+                class="channel-input"
+                placeholder="频道名 (如 wow_wyc)"
+                autocapitalize="none"
+                autocorrect="off"
+                spellcheck="false"
+              >
+            </div>
+            <button type="submit" class="btn btn-primary btn-join" id="btn-join">进入</button>
+          </form>
+
+          <button id="btn-open-settings" class="btn btn-icon" title="设置" aria-label="设置">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Key Warning Banner (Required: id="key-banner") -->
+    <aside id="key-banner" class="key-banner" role="alert">
+      <div class="key-banner-content">
+        <span class="key-banner-icon">⚠️</span>
+        <span class="key-banner-text">请先在设置中输入 Gemini API Key（Enter Gemini API key）</span>
+      </div>
+      <button id="btn-banner-settings" class="btn btn-banner">立即配置</button>
+    </aside>
+
+    <!-- Chat Messages Stream -->
+    <main class="chat-viewport">
+      <div id="chat-messages" class="chat-messages" aria-live="polite">
+        <!-- Messages are inserted dynamically here -->
+        <div class="chat-empty-state" id="chat-empty-state">
+          <div class="empty-icon">💬</div>
+          <h3>正在连接 Twitch 聊天室...</h3>
+          <p>消息将实时呈现，并由 Gemini 智能翻译与解析魔兽/游戏俚语（pog, kek, LFG, tank 等）。</p>
+          <div class="empty-tips">
+            <span>💡 提示：点击任意消息即可呼出 3 种地道英文回复建议</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Floating Scroll to Bottom Button -->
+      <button id="btn-scroll-bottom" class="btn-scroll-bottom hidden" aria-label="滚动到底部">
+        <span>↓ 回到底部</span>
+        <span id="unread-count-badge" class="unread-count-badge hidden">0</span>
+      </button>
+    </main>
+
+    <!-- Reply Suggestions Sheet / Modal (Bottom Sheet on iPad) -->
+    <div id="reply-sheet" class="sheet-backdrop hidden" aria-hidden="true" role="dialog" aria-labelledby="reply-sheet-title">
+      <div class="sheet-container">
+        <div class="sheet-handle"></div>
+        <div class="sheet-header">
+          <div class="sheet-title-group">
+            <h2 id="reply-sheet-title" class="sheet-title">💬 英文回复建议 (Reply Suggestions)</h2>
+            <span class="safe-badge">🔒 绝不自动发送到聊天室，仅供复制</span>
+          </div>
+          <button id="btn-close-sheet" class="btn-close" aria-label="关闭">✕</button>
+        </div>
+
+        <div class="sheet-body">
+          <!-- Quoted Source Message -->
+          <div class="source-message-box">
+            <div class="source-meta">
+              <span id="source-author" class="source-author">Author</span>
+              <span id="source-time" class="source-time">00:00</span>
+            </div>
+            <div id="source-text" class="source-text">Original message</div>
+            <div id="source-translation" class="source-translation">翻译载入中...</div>
+          </div>
+
+          <!-- Suggestions List -->
+          <div id="suggestions-wrap" class="suggestions-wrap">
+            <div id="suggestions-loading" class="suggestions-loading hidden">
+              <div class="loader-spinner"></div>
+              <p>Gemini 正在针对当前语境构思 3 种地道英文回复...</p>
+            </div>
+
+            <div id="suggestions-cards" class="suggestions-cards">
+              <!-- Card: Simple -->
+              <div class="suggestion-card card-simple">
+                <div class="card-head">
+                  <span class="badge badge-simple">1. Simple 简洁明快</span>
+                  <button class="btn btn-copy" data-target="simple" aria-label="复制简洁回复">
+                    <span class="copy-icon">📋</span>
+                    <span class="copy-text">复制</span>
+                  </button>
+                </div>
+                <div class="card-en" id="reply-simple-en">Nice play!</div>
+                <div class="card-zh" id="reply-simple-zh">简短直接的赞赏或回应</div>
+              </div>
+
+              <!-- Card: Natural -->
+              <div class="suggestion-card card-natural">
+                <div class="card-head">
+                  <span class="badge badge-natural">2. Natural 地道弹幕</span>
+                  <button class="btn btn-copy" data-target="natural" aria-label="复制地道回复">
+                    <span class="copy-icon">📋</span>
+                    <span class="copy-text">复制</span>
+                  </button>
+                </div>
+                <div class="card-en" id="reply-natural-en">Clean pull ngl, love to see it</div>
+                <div class="card-zh" id="reply-natural-zh">原生 Twitch 玩家说话节奏与习惯</div>
+              </div>
+
+              <!-- Card: Playful -->
+              <div class="suggestion-card card-playful">
+                <div class="card-head">
+                  <span class="badge badge-playful">3. Playful 趣味调侃</span>
+                  <button class="btn btn-copy" data-target="playful" aria-label="复制趣味回复">
+                    <span class="copy-icon">📋</span>
+                    <span class="copy-text">复制</span>
+                  </button>
+                </div>
+                <div class="card-en" id="reply-playful-en">Bro is cooking let him cook haha</div>
+                <div class="card-zh" id="reply-playful-zh">风趣幽默造梗，活跃直播间氛围</div>
+              </div>
+            </div>
+
+            <div id="suggestions-error" class="suggestions-error hidden">
+              <p id="suggestions-error-text">生成回复建议失败，请检查 API Key 或重试。</p>
+              <button id="btn-retry-suggestions" class="btn btn-secondary">重新生成</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="modal-backdrop hidden" aria-hidden="true" role="dialog" aria-labelledby="settings-title">
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <h2 id="settings-title" class="modal-title">⚙️ 设置 (Settings)</h2>
+          <button id="btn-close-settings" class="btn-close" aria-label="关闭">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label for="input-api-key" class="form-label">
+              Gemini API Key
+              <span class="badge badge-local">仅保存在本地 localStorage</span>
+            </label>
+            <div class="input-password-wrap">
+              <input
+                type="password"
+                id="input-api-key"
+                class="form-input"
+                placeholder="AIzaSy..."
+                autocomplete="off"
+                spellcheck="false"
+              >
+              <button type="button" id="btn-toggle-key-visibility" class="btn-toggle-visibility" title="显示/隐藏 Key">
+                👁️
+              </button>
+            </div>
+            <p class="form-tip">
+              前往 <a href="https://aistudio.google.com/" target="_blank" rel="noopener noreferrer">Google AI Studio</a> 免费获取 API Key。代码与服务端零存储。
+            </p>
+          </div>
+
+          <div class="form-group">
+            <label for="select-model" class="form-label">Gemini 模型 (Model)</label>
+            <select id="select-model" class="form-select">
+              <option value="gemini-3.1-flash-lite" selected>gemini-3.1-flash-lite (默认推荐，快且省额度)</option>
+              <option value="gemini-3-flash-preview">gemini-3-flash-preview (更聪明)</option>
+              <option value="gemini-flash-latest">gemini-flash-latest</option>
+              <option value="custom">自定义模型名称...</option>
+            </select>
+            <input
+              type="text"
+              id="input-custom-model"
+              class="form-input hidden"
+              placeholder="例如：gemini-3-flash-preview"
+              style="margin-top: 8px;"
+            >
+          </div>
+
+          <div class="form-group">
+            <div class="test-key-row">
+              <button type="button" id="btn-test-key" class="btn btn-secondary">测试 API 连接</button>
+              <span id="test-key-status" class="test-key-status"></span>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" id="btn-clear-settings" class="btn btn-danger">清除配置</button>
+          <button type="button" id="btn-save-settings" class="btn btn-primary">保存设置</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+  </div>
+
+  <!-- Pure functions library -->
+  <script src="lib.js"></script>
+  <!-- Main application script -->
+  <script src="app.js"></script>
+</body>
+</html>
