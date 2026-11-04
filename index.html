@@ -171,6 +171,7 @@
         </div>
         <div class="modal-body">
           <div class="form-group">
+            <div id="first-visit-tip" class="hidden" style="background:#3b2a05;border:1px solid #f59e0b;color:#fde68a;padding:10px 12px;border-radius:8px;margin-bottom:12px;font-size:15px;">👋 首次使用：请把 Gemini API Key 粘贴到下方并点「保存设置」，只需一次，仅保存在本机浏览器。</div>
             <label for="input-api-key" class="form-label">
               Gemini API Key
               <span class="badge badge-local">仅保存在本地 localStorage</span>
@@ -196,9 +197,9 @@
           <div class="form-group">
             <label for="select-model" class="form-label">Gemini 模型 (Model)</label>
             <select id="select-model" class="form-select">
-              <option value="gemini-3.1-flash-lite" selected>gemini-3.1-flash-lite (默认推荐，快且省额度)</option>
-              <option value="gemini-3-flash-preview">gemini-3-flash-preview (更聪明)</option>
-              <option value="gemini-flash-latest">gemini-flash-latest</option>
+              <option value="gemini-3.5-flash" selected>gemini-3.5-flash (默认推荐)</option>
+              <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (更快更省额度)</option>
+              <option value="gemini-3-flash-preview">gemini-3-flash-preview (备用)</option>
               <option value="custom">自定义模型名称...</option>
             </select>
             <input

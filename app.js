@@ -22,7 +22,8 @@
   const STORAGE_KEY_API_KEY = 'twitch_copilot_gemini_key';
   const STORAGE_KEY_MODEL = 'twitch_copilot_gemini_model';
   const DEFAULT_CHANNEL = 'wow_wyc';
-  const DEFAULT_MODEL = 'gemini-3.1-flash-lite';
+  const DEFAULT_MODEL = 'gemini-3.5-flash';
+  const FALLBACK_MODEL = 'gemini-3-flash-preview';
   const MAX_MESSAGES = 300;
   const BATCH_INTERVAL_MS = 2500;
 
@@ -82,7 +83,7 @@
     wsReconnectAttempt: 0,
     wsReconnectTimer: null,
     apiKey: localStorage.getItem(STORAGE_KEY_API_KEY) || '',
-    model: (/^gemini-(1|2)\./.test(localStorage.getItem(STORAGE_KEY_MODEL) || '') ? DEFAULT_MODEL : (localStorage.getItem(STORAGE_KEY_MODEL) || DEFAULT_MODEL)),
+    model: (/^gemini-(1\.|2\.|3\.1-flash-lite$)/.test(localStorage.getItem(STORAGE_KEY_MODEL) || '') ? DEFAULT_MODEL : (localStorage.getItem(STORAGE_KEY_MODEL) || DEFAULT_MODEL)),
     messageStore: new Map(), // id -> { id, author, text, timestamp, color, zh, note, replies }
     unreadCount: 0,
     userScrolledUp: false,
@@ -124,7 +125,7 @@
 
   function openSettingsModal() {
     elements.inputApiKey.value = state.apiKey;
-    if (['gemini-3.1-flash-lite', 'gemini-3-flash-preview', 'gemini-flash-latest'].includes(state.model)) {
+    if (['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3-flash-preview'].includes(state.model)) {
       elements.selectModel.value = state.model;
       elements.inputCustomModel.classList.add('hidden');
     } else {
@@ -190,6 +191,16 @@
      Gemini REST API Calls
      ========================================================================== */
   async function requestGemini(promptText, apiKey, model) {
+    const first = await requestGeminiOnce(promptText, apiKey, model);
+    const used = model || state.model || DEFAULT_MODEL;
+    if ((first.status === 404 || first.status === 503) && used !== FALLBACK_MODEL) {
+      console.warn('Model ' + used + ' returned ' + first.status + ', falling back to ' + FALLBACK_MODEL);
+      return requestGeminiOnce(promptText, apiKey, FALLBACK_MODEL);
+    }
+    return first;
+  }
+
+  async function requestGeminiOnce(promptText, apiKey, model) {
     const activeModel = model || state.model || DEFAULT_MODEL;
     const activeKey = apiKey || state.apiKey;
     if (!activeKey) {
@@ -859,6 +870,13 @@
     bindEvents();
     updateKeyBannerState();
     connectToTwitch(targetChannel);
+    // First visit without a key: prompt once to paste the Gemini key
+    if (!state.apiKey) {
+      openSettingsModal();
+      const tip = document.getElementById('first-visit-tip');
+      if (tip) tip.classList.remove('hidden');
+      setTimeout(() => elements.inputApiKey.focus(), 100);
+    }
   }
 
   // Run on DOM ready
